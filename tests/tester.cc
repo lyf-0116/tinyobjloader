@@ -3124,6 +3124,38 @@ void test_quad_face_triangulated() {
   TEST_CHECK(reader.GetShapes()[0].mesh.num_face_vertices.size() == 2);
 }
 
+// Concave quad with triangulation: the shorter diagonal (0-2) crosses the
+// concave side, so the split must use the longer interior diagonal (1-3)
+// to keep the triangle orientation consistent with the quad winding.
+void test_quad_face_concave_triangulated() {
+  const char *obj_text =
+      "v 0.0 0.0 0.0\n"
+      "v 1.0 0.1 0.0\n"
+      "v 2.0 0.0 0.0\n"
+      "v 1.0 10.0 0.0\n"
+      "f 1 2 3 4\n";
+  tinyobj::ObjReaderConfig config;
+  config.triangulate = true;
+  tinyobj::ObjReader reader;
+  bool ret = reader.ParseFromString(obj_text, "", config);
+  TEST_CHECK(ret == true);
+  TEST_CHECK(reader.GetShapes().size() == 1);
+  const tinyobj::mesh_t &mesh = reader.GetShapes()[0].mesh;
+  TEST_CHECK(mesh.indices.size() == 6);
+  // Interior diagonal 1-3: [0, 1, 3], [1, 2, 3]
+  TEST_CHECK(mesh.indices[0].vertex_index == 0);
+  TEST_CHECK(mesh.indices[1].vertex_index == 1);
+  TEST_CHECK(mesh.indices[2].vertex_index == 3);
+  TEST_CHECK(mesh.indices[3].vertex_index == 1);
+  TEST_CHECK(mesh.indices[4].vertex_index == 2);
+  TEST_CHECK(mesh.indices[5].vertex_index == 3);
+  // indices / num_face_vertices / material_ids / smoothing_group_ids
+  // stay in sync: 2 triangles each.
+  TEST_CHECK(mesh.num_face_vertices.size() == 2);
+  TEST_CHECK(mesh.material_ids.size() == 2);
+  TEST_CHECK(mesh.smoothing_group_ids.size() == 2);
+}
+
 // Face with v/vt/vn format
 void test_face_full_index_format() {
   const char *obj_text =
@@ -4481,6 +4513,7 @@ TEST_LIST = {
     {"test_split_string_edge_cases", test_split_string_edge_cases},
     {"test_quad_face", test_quad_face},
     {"test_quad_face_triangulated", test_quad_face_triangulated},
+    {"test_quad_face_concave_triangulated", test_quad_face_concave_triangulated},
     {"test_face_full_index_format", test_face_full_index_format},
     {"test_face_vertex_normal_only", test_face_vertex_normal_only},
     {"test_mtl_multiple_properties", test_mtl_multiple_properties},

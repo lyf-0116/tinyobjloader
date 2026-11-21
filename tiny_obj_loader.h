@@ -7643,6 +7643,90 @@ inline TinyObjPoint WorldToLocal(const TinyObjPoint &a, const TinyObjPoint &u,
   return TinyObjPoint(dot(a, u), dot(a, v), dot(a, w));
 }
 
+// Decide which diagonal to split a quad into two triangles along.
+//
+// A quad (p0, p1, p2, p3) has two candidate diagonals: 0-2 and 1-3.
+// Splitting along the shorter diagonal avoids skinny triangles, but for
+// concave or twisted quads the shorter diagonal can cross the concave side
+// and lie outside the surface, flipping the orientation of the emitted
+// triangles. So first test which diagonals are interior to the quad (in the
+// projection onto the quad's dominant normal plane): when exactly one
+// diagonal is interior, split along it to keep the winding correct.
+// Otherwise (convex quad: both interior; degenerate quad: neither) fall
+// back to the shorter diagonal.
+//
+// Returns true to split along diagonal 0-2, false to split along 1-3.
+static inline bool QuadSplitAlongDiagonal02(const real_t p[][3]) {
+  // Quad normal via Newell's method (computed in double).
+  double nx = 0.0, ny = 0.0, nz = 0.0;
+  for (int k = 0; k < 4; k++) {
+    const int j = (k + 1) % 4;
+    nx += (double(p[k][1]) - double(p[j][1])) *
+          (double(p[k][2]) + double(p[j][2]));
+    ny += (double(p[k][2]) - double(p[j][2])) *
+          (double(p[k][0]) + double(p[j][0]));
+    nz += (double(p[k][0]) - double(p[j][0])) *
+          (double(p[k][1]) + double(p[j][1]));
+  }
+
+  // Project the corners onto the plane perpendicular to the dominant
+  // normal axis.
+  const double ax = std::fabs(nx);
+  const double ay = std::fabs(ny);
+  const double az = std::fabs(nz);
+  int axis0 = 0, axis1 = 1;  // drop z
+  if (ax >= ay && ax >= az) {
+    axis0 = 1;  // drop x
+    axis1 = 2;
+  } else if (ay >= az) {
+    axis0 = 2;  // drop y
+    axis1 = 0;
+  }
+  double qx[4], qy[4];
+  double scale = 0.0;
+  for (int k = 0; k < 4; k++) {
+    qx[k] = double(p[k][axis0]);
+    qy[k] = double(p[k][axis1]);
+    const double mx = std::fabs(qx[k]);
+    const double my = std::fabs(qy[k]);
+    if (mx > scale) scale = mx;
+    if (my > scale) scale = my;
+  }
+  const double eps = scale * scale * 1e-9;
+
+  // A diagonal is interior when the two triangles adjacent to it are
+  // non-degenerate and wound to the same side.
+  const double o012 = (qx[1] - qx[0]) * (qy[2] - qy[0]) -
+                      (qy[1] - qy[0]) * (qx[2] - qx[0]);
+  const double o023 = (qx[2] - qx[0]) * (qy[3] - qy[0]) -
+                      (qy[2] - qy[0]) * (qx[3] - qx[0]);
+  const double o123 = (qx[2] - qx[1]) * (qy[3] - qy[1]) -
+                      (qy[2] - qy[1]) * (qx[3] - qx[1]);
+  const double o130 = (qx[3] - qx[1]) * (qy[0] - qy[1]) -
+                      (qy[3] - qy[1]) * (qx[0] - qx[1]);
+
+  const bool interior02 = (std::fabs(o012) > eps) &&
+                          (std::fabs(o023) > eps) &&
+                          ((o012 > 0.0) == (o023 > 0.0));
+  const bool interior13 = (std::fabs(o123) > eps) &&
+                          (std::fabs(o130) > eps) &&
+                          ((o123 > 0.0) == (o130 > 0.0));
+
+  if (interior02 && !interior13) return true;
+  if (interior13 && !interior02) return false;
+
+  // Convex (both interior) or degenerate (neither): shorter 3D diagonal.
+  const double e02x = double(p[2][0]) - double(p[0][0]);
+  const double e02y = double(p[2][1]) - double(p[0][1]);
+  const double e02z = double(p[2][2]) - double(p[0][2]);
+  const double e13x = double(p[3][0]) - double(p[1][0]);
+  const double e13y = double(p[3][1]) - double(p[1][1]);
+  const double e13z = double(p[3][2]) - double(p[1][2]);
+  const double sqr02 = e02x * e02x + e02y * e02y + e02z * e02z;
+  const double sqr13 = e13x * e13x + e13y * e13y + e13z * e13z;
+  return sqr02 < sqr13;
+}
+
 // TODO(syoyo): refactor function.
 static bool exportGroupsToShape(shape_t *shape, const PrimGroup &prim_group,
                                 const std::vector<tag_t> &tags,
@@ -7715,9 +7799,9 @@ static bool exportGroupsToShape(shape_t *shape, const PrimGroup &prim_group,
 
           // There are two candidates to split the quad into two triangles.
           //
-          // Choose the shortest edge.
-          // TODO: Is it better to determine the edge to split by calculating
-          // the area of each triangle?
+          // Prefer the diagonal interior to the quad so concave or twisted
+          // quads keep their orientation; fall back to the shortest
+          // diagonal for convex or degenerate quads.
           //
           // +---+
           // |\  |
@@ -7731,15 +7815,9 @@ static bool exportGroupsToShape(shape_t *shape, const PrimGroup &prim_group,
           // |/  |
           // +---+
 
-          real_t e02x = v2x - v0x;
-          real_t e02y = v2y - v0y;
-          real_t e02z = v2z - v0z;
-          real_t e13x = v3x - v1x;
-          real_t e13y = v3y - v1y;
-          real_t e13z = v3z - v1z;
-
-          real_t sqr02 = e02x * e02x + e02y * e02y + e02z * e02z;
-          real_t sqr13 = e13x * e13x + e13y * e13y + e13z * e13z;
+          const real_t quad_pos[4][3] = {
+              {v0x, v0y, v0z}, {v1x, v1y, v1z}, {v2x, v2y, v2z}, {v3x, v3y, v3z}};
+          const bool split02 = QuadSplitAlongDiagonal02(quad_pos);
 
           index_t idx0, idx1, idx2, idx3;
 
@@ -7756,7 +7834,7 @@ static bool exportGroupsToShape(shape_t *shape, const PrimGroup &prim_group,
           idx3.normal_index = i3.vn_idx;
           idx3.texcoord_index = i3.vt_idx;
 
-          if (sqr02 < sqr13) {
+          if (split02) {
             // [0, 1, 2], [0, 2, 3]
             shape->mesh.indices.push_back(idx0);
             shape->mesh.indices.push_back(idx1);
@@ -10626,16 +10704,9 @@ static inline size_t opt_triangulate_face(const std::vector<real_t> &vertices,
     const real_t v3y = vertices[vi3 * 3 + 1];
     const real_t v3z = vertices[vi3 * 3 + 2];
 
-    const real_t e02x = v2x - v0x;
-    const real_t e02y = v2y - v0y;
-    const real_t e02z = v2z - v0z;
-    const real_t e13x = v3x - v1x;
-    const real_t e13y = v3y - v1y;
-    const real_t e13z = v3z - v1z;
-    const real_t sqr02 = e02x * e02x + e02y * e02y + e02z * e02z;
-    const real_t sqr13 = e13x * e13x + e13y * e13y + e13z * e13z;
-
-    if (sqr02 < sqr13) {
+    const real_t quad_pos[4][3] = {
+        {v0x, v0y, v0z}, {v1x, v1y, v1z}, {v2x, v2y, v2z}, {v3x, v3y, v3z}};
+    if (QuadSplitAlongDiagonal02(quad_pos)) {
       dst[0] = face[0];
       dst[1] = face[1];
       dst[2] = face[2];
@@ -10790,15 +10861,12 @@ static inline size_t opt_triangulate_face(const real_t *vertices,
     const size_t vi1 = static_cast<size_t>(face[1].vertex_index);
     const size_t vi2 = static_cast<size_t>(face[2].vertex_index);
     const size_t vi3 = static_cast<size_t>(face[3].vertex_index);
-    const real_t e02x = vertices[vi2*3+0] - vertices[vi0*3+0];
-    const real_t e02y = vertices[vi2*3+1] - vertices[vi0*3+1];
-    const real_t e02z = vertices[vi2*3+2] - vertices[vi0*3+2];
-    const real_t e13x = vertices[vi3*3+0] - vertices[vi1*3+0];
-    const real_t e13y = vertices[vi3*3+1] - vertices[vi1*3+1];
-    const real_t e13z = vertices[vi3*3+2] - vertices[vi1*3+2];
-    const real_t sqr02 = e02x*e02x + e02y*e02y + e02z*e02z;
-    const real_t sqr13 = e13x*e13x + e13y*e13y + e13z*e13z;
-    if (sqr02 < sqr13) {
+    const real_t quad_pos[4][3] = {
+        {vertices[vi0*3+0], vertices[vi0*3+1], vertices[vi0*3+2]},
+        {vertices[vi1*3+0], vertices[vi1*3+1], vertices[vi1*3+2]},
+        {vertices[vi2*3+0], vertices[vi2*3+1], vertices[vi2*3+2]},
+        {vertices[vi3*3+0], vertices[vi3*3+1], vertices[vi3*3+2]}};
+    if (QuadSplitAlongDiagonal02(quad_pos)) {
       dst[0]=face[0]; dst[1]=face[1]; dst[2]=face[2];
       dst[3]=face[0]; dst[4]=face[2]; dst[5]=face[3];
     } else {
